@@ -1145,6 +1145,7 @@ async function generateStack() {
 
 let workOrderState = null; // 最近一次工单结果
 let workOrderPayload = null; // 生成工单所用请求体（导出复用）
+let samplingState = null; // 最近一次裁切抽检计划结果
 let progressState = null; // 最近一次现场进度结果
 let progressBusy = false; // 进度接口请求中（避免重复提交）
 
@@ -1159,6 +1160,7 @@ const WO_REASON_LABEL = {
 function showWorkOrderPanel(schedule) {
   workOrderState = null;
   workOrderPayload = null;
+  clearSamplingUi();
   clearProgressUi();
   progressStorageClear(); // 排程已重新生成，旧工单的持久化进度不再适用
   $('woResult').hidden = true;
@@ -1180,6 +1182,7 @@ function clearWorkOrderUi() {
   $('woResult').innerHTML = '';
   $('woError').hidden = true;
   $('woError').textContent = '';
+  clearSamplingUi();
   clearProgressUi();
   progressStorageClear(); // 离开当前工单（重新排产 / 切换模式）后，持久化进度失效
 }
@@ -1213,6 +1216,9 @@ async function downloadWorkOrder(format) {
 
 function renderWorkOrder(data, opts = {}) {
   workOrderState = data;
+  // 工单（重新）生成后，旧抽检计划可能基于不同容量的工单：重置结果区
+  clearSamplingUi();
+  $('samplingPanel').hidden = false;
   const s = data.summary;
 
   const shiftBlocks = data.shifts.map((shift) => {
@@ -1322,6 +1328,9 @@ function renderWorkOrder(data, opts = {}) {
   if (!opts.skipProgress) {
     showProgressForCurrentWorkOrder();
   }
+
+  // 工单生成成功后开放裁切抽检计划区（沿用当前工单与排程）
+  $('samplingPanel').hidden = false;
 }
 
 async function generateWorkOrder() {
@@ -1362,6 +1371,163 @@ async function generateWorkOrder() {
     errBox.hidden = false;
   } finally {
     $('woGenerate').disabled = false;
+  }
+}
+
+/* ---------------- 裁切抽检计划（逐轮选纸覆盖已分配刀次） ---------------- */
+
+const SP_REASON_LABEL = {
+  'over-capacity': '超每批容量',
+  'missing-parent': '父刀缺失',
+  blocked: '上游被阻断',
+};
+
+const SP_STOP_LABEL = {
+  covered: ['ok', '✔ 已覆盖全部已分配刀次，抽检提前结束。'],
+  'max-samples': ['warn', '⚠ 已达抽检用纸上限，仍有刀次未覆盖（见未覆盖清单）。'],
+};
+
+function clearSamplingUi() {
+  samplingState = null;
+  const panel = $('samplingPanel');
+  if (panel) panel.hidden = true;
+  const box = $('spResult');
+  if (box) { box.hidden = true; box.innerHTML = ''; }
+  const err = $('spError');
+  if (err) { err.hidden = true; err.textContent = ''; }
+}
+
+function renderSampling(data) {
+  samplingState = data;
+  const s = data.summary;
+  const pct = (s.coverageRate * 100).toFixed(1);
+  const [stopCls, stopText] = SP_STOP_LABEL[data.stopReason] || ['warn', data.stopReason];
+
+  // 逐轮选择依据
+  const roundRows = data.rounds.map((rd) => `
+    <tr>
+      <td class="num">${rd.round}</td>
+      <td class="num"><b>${rd.sheetIndex}</b></td>
+      <td class="num"><b>${rd.newCoveredCuts}</b></td>
+      <td class="num">${rd.totalParticipatedCuts}</td>
+      <td class="num">${rd.coveredAfter} / ${s.assignedCutsTotal}</td>
+      <td>${rd.note}</td>
+    </tr>`).join('');
+
+  // 抽中纸张及其覆盖刀次
+  const sheetBlocks = data.sheets.map((sh) => `
+    <details class="sp-sheet" open>
+      <summary>第 ${sh.sheetIndex} 张纸 · 覆盖 <b>${sh.cutCount}</b> 个已分配刀次</summary>
+      <div class="sp-cutlist">${sh.cuts.map((c) =>
+        `<span class="sp-cut-chip" title="来源批次 ${c.batchNo} · 成员 ${c.members.map((m) => `${m.sheetIndex}#${m.cutNo}`).join('、')}">全局 #${c.cutNo}<small>（批 ${c.batchNo}）</small></span>`
+      ).join('')}</div>
+    </details>`).join('');
+
+  // 未覆盖刀次明细
+  const uncoveredBlock = data.uncoveredCuts.length
+    ? `
+      <h4>未覆盖刀次（${data.uncoveredCuts.length} 把）</h4>
+      <div class="wo-table-wrap">
+        <table class="wo-table sp-uncov">
+          <thead><tr>
+            <th class="num">全局刀次</th><th class="num">来源批次</th><th>成员纸张/原刀号</th>
+          </tr></thead>
+          <tbody>
+            ${data.uncoveredCuts.map((c) => `
+              <tr>
+                <td class="num"><b>${c.cutNo}</b></td>
+                <td class="num">${c.batchNo}</td>
+                <td class="members">${c.members.map((m) => `${m.sheetIndex}#${m.cutNo}`).join('、')}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`
+    : '<p class="badge-ok">✔ 已分配刀次全部覆盖。</p>';
+
+  // 未分配刀（单列、不计入分母）
+  const unassignedBlock = data.unassigned.length
+    ? `
+      <h4>未分配刀（${data.unassigned.length} 把，单列提示、不计入覆盖率）</h4>
+      <div class="wo-table-wrap">
+        <table class="wo-table sp-unassigned">
+          <thead><tr>
+            <th class="num">纸张</th><th class="num">原刀号</th><th>原因</th>
+            <th class="num">来源批次</th><th>说明</th>
+          </tr></thead>
+          <tbody>
+            ${data.unassigned.map((u) => `
+              <tr>
+                <td class="num">${u.sheetIndex}</td>
+                <td class="num">#${u.cutNo}</td>
+                <td><span class="reason-tag r-${u.reason}">${SP_REASON_LABEL[u.reason] || u.reason}</span></td>
+                <td class="num">${u.batchNo == null ? '—' : u.batchNo}</td>
+                <td>${u.detail}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`
+    : '';
+
+  $('spResult').innerHTML = `
+    <div class="stop-reason ${stopCls}">${stopText}</div>
+    <div class="stack-summary stats">
+      <div class="stat">已分配刀次：<b>${s.assignedCutsTotal}</b> 个</div>
+      <div class="stat">已覆盖：<b>${s.coveredCuts}</b> 个</div>
+      <div class="stat">未覆盖：<b>${s.uncoveredCuts}</b> 个</div>
+      <div class="stat">抽中纸张：<b>${s.sheetsSelected}</b> / 上限 ${data.maxSamples} 张</div>
+      <div class="stat">未分配刀：<b>${s.unassignedCuts}</b> 把（不计入分母）</div>
+      <div class="stat" style="flex-basis:100%">覆盖率：<b>${pct}%</b>
+        <div class="ratio-bar${s.coverageRate < 1 ? ' low' : ''}"><span style="width:${pct}%"></span></div>
+      </div>
+    </div>
+    <h4>逐轮选择依据（${data.rounds.length} 轮）</h4>
+    <div class="wo-table-wrap">
+      <table class="wo-table sp-rounds">
+        <thead><tr>
+          <th class="num">轮次</th><th class="num">选中纸张</th><th class="num">新增覆盖</th>
+          <th class="num">参与刀次总数</th><th class="num">累计覆盖</th><th>选择依据</th>
+        </tr></thead>
+        <tbody>${roundRows}</tbody>
+      </table>
+    </div>
+    <h4>抽中纸张与覆盖明细</h4>
+    ${sheetBlocks || '<p class="placeholder">本轮未抽中任何纸张。</p>'}
+    ${uncoveredBlock}
+    ${unassignedBlock}
+  `;
+  $('spResult').hidden = false;
+}
+
+async function generateSampling() {
+  const errBox = $('spError');
+  errBox.hidden = true;
+  errBox.textContent = '';
+  if (!workOrderState || !stackState) {
+    errBox.textContent = '请先生成叠纸裁切排程与执行工单。';
+    errBox.hidden = false;
+    return;
+  }
+  const maxSamples = Number($('spMaxSamples').value);
+  if (!(Number.isInteger(maxSamples) && maxSamples >= 1 && maxSamples <= 500)) {
+    errBox.textContent = '抽检用纸上限须为 1～500 的整数。';
+    errBox.hidden = false;
+    return;
+  }
+  $('spGenerate').disabled = true;
+  try {
+    const resp = await fetch('/api/layout/stack/work-order/sampling', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workOrder: workOrderState, schedule: stackState, maxSamples }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || '抽检计划生成失败');
+    renderSampling(data);
+  } catch (e) {
+    errBox.textContent = e.message;
+    errBox.hidden = false;
+  } finally {
+    $('spGenerate').disabled = false;
   }
 }
 
@@ -1681,6 +1847,7 @@ $('addRow').addEventListener('click', () => addProductRow());
 $('addPaper').addEventListener('click', () => addPaperRow());
 $('stackGenerate').addEventListener('click', generateStack);
 $('woGenerate').addEventListener('click', generateWorkOrder);
+$('spGenerate').addEventListener('click', generateSampling);
 $('clearBtn').addEventListener('click', () => {
   $('productRows').innerHTML = '';
   addProductRow();
