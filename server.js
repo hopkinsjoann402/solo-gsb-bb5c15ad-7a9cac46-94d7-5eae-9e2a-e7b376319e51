@@ -7,6 +7,7 @@ const { layoutCostBatch } = require('./src/cost');
 const { stackSchedule } = require('./src/stack');
 const { workOrder, workOrderCsv } = require('./src/workorder');
 const { workOrderProgress } = require('./src/progress');
+const { cuttingSamplingPlan } = require('./src/sampling');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -105,6 +106,20 @@ app.post('/api/layout/stack/work-order/progress', (req, res) => {
   try {
     const body = req.body || {};
     const result = workOrderProgress(body);
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message || '输入无效' });
+  }
+});
+
+// 裁切抽检计划：把每个已分配全局刀次视为必须覆盖目标，抽检一张纸即覆盖其
+// 参与的全部刀次；按 新增覆盖刀次最多→该纸参与刀次总数多→纸张序号小
+// 逐轮选纸，达到上限或覆盖完成即止，返回选中纸张、各自覆盖刀次、逐轮依据、
+// 覆盖率与未覆盖刀次（未分配刀单列且不计入分母）
+app.post('/api/layout/stack/work-order/sampling', (req, res) => {
+  try {
+    const body = req.body || {};
+    const result = cuttingSamplingPlan(body);
     res.json(result);
   } catch (err) {
     res.status(400).json({ error: err.message || '输入无效' });

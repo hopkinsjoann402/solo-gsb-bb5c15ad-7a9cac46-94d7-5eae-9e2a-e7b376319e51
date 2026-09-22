@@ -856,3 +856,44 @@ input:focus, select:focus {
   font-weight: 400;
 }
 .sp-reason.sp-block { color: #c92a2a; }
+
+/* 裁切抽检计划 */
+.sampling-panel {
+  border: 1px solid #b2f2bb;
+  background: #f6fff9;
+  border-radius: 8px;
+  padding: 10px 14px 12px;
+  margin-top: 12px;
+  font-size: 13px;
+}
+.sampling-panel h3 { margin: 0 0 8px; font-size: 14px; color: #1a6b3c; }
+.sampling-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 6px; }
+.sampling-controls label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+.sampling-controls input { width: 90px; }
+.sampling-controls .hint { flex-basis: 100%; }
+.smp-plan-table td.smp-cuts { white-space: normal; }
+.smp-cuts-new b { color: #1a6b3c; }
+.smp-cuts-all { display: block; font-size: 11.5px; color: #667085; margin-top: 2px; }
+.smp-rounds {
+  border: 1px solid #b2f2bb;
+  border-radius: 6px;
+  margin: 8px 0;
+  padding: 6px 10px;
+  background: #f6fff9;
+}
+.smp-rounds > summary {
+  cursor: pointer;
+  font-weight: 700;
+  font-size: 12.5px;
+  color: #1a6b3c;
+  list-style: none;
+}
+.smp-rounds > summary::-webkit-details-marker { display: none; }
+.smp-rounds > summary::before { content: '▸ '; }
+.smp-rounds[open] > summary::before { content: '▾ '; }
+.smp-rounds ol { margin: 6px 0 2px 18px; padding: 0; }
+.smp-rounds li { margin-bottom: 4px; line-height: 1.6; }
+.smp-basis-note { color: #667085; font-weight: 400; }
+.smp-stop { margin-left: 10px; font-size: 12px; font-weight: 700; }
+.smp-stop.ok { color: #2b8a3e; }
+.smp-stop.warn { color: #d9480f; }

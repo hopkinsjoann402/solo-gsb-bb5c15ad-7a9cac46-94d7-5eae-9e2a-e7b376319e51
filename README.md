@@ -10,6 +10,10 @@
 把各张纸的切割树合批为可执行刀次（受叠纸上限与父刀先后约束），输出批次表、每张纸进度与未排原因。
 叠纸排程之上还可生成**执行工单**：操作者指定每班最多刀次与每批最多纸张，服务端按父刀依赖做
 稳定拓扑拆分，输出班次 / 刀次清单、跨班次依赖与未分配刀及原因，支持下载 JSON / CSV。
+工单结果之上还可生成**裁切抽检计划**：给定抽检纸张上限，把每个已分配全局刀次视为必须覆盖
+目标（抽检一张纸即覆盖它参与的全部刀次），逐轮按「新增覆盖刀次最多 → 该纸参与刀次总数多 →
+纸张序号小」选纸，返回抽检纸张、各自覆盖刀次、逐轮选择依据、覆盖率与未覆盖刀次，
+未分配刀单列且不计入覆盖率分母。
 
 ## 裁切规则
 
@@ -381,13 +385,92 @@
 工单与排程结果保存在浏览器 `localStorage`，**刷新页面后自动恢复面板并以服务端重算进度**；
 重新生成排产方案 / 工单或切换模式时清除旧进度。工单的 **JSON / CSV 导出不受影响**。
 
+## 裁切抽检计划（逐轮选纸覆盖刀次）
+
+执行工单生成后，工单结果区提供**裁切抽检计划**面板：质检环节只需抽检少数几张纸，
+服务端按确定性贪心规则给出“抽检哪几张即可覆盖尽量多已分配全局刀次”的方案。
+
+**覆盖口径**：
+
+- 工单中的每个**已分配全局刀次**（`shifts[*].cuts[*]`）都是必须覆盖目标；
+  合批刀次一刀多张，**一张纸被抽检即覆盖它参与的全部全局刀次**；
+- 工单单列的**未分配刀**（`unassigned`）**不计入覆盖率分母**，在返回的
+  `unassignedCuts` 中原样单列；已分配刀次成员表中被标记为未分配的成员刀
+  （与现场进度同一口径）不计入该刀的可抽检参与，但该纸仍计入参与纸张总数。
+
+**逐轮选纸规则（确定性）**——每轮在“仍能新增覆盖”的纸张中依次决胜：
+
+1. **新增覆盖刀次最多**：选中该纸后新纳入覆盖集的全局刀次数最多；
+2. 再按**该纸参与刀次总数多**：该纸参与的全部已分配全局刀次数最多；
+3. 再按**纸张序号小**。
+
+达到抽检纸张上限（`maxSamples`，1～10000 的正整数）或全部目标刀次覆盖完成即止。
+
+接口 `POST /api/layout/stack/work-order/sampling` 请求体：
+
+- `workOrder`：执行工单接口的完整返回（必含 `shifts`，可含 `unassigned`）；
+- `schedule`：叠纸排程返回（必含 `batches`，用于成员引用与归属交叉核对）；
+- `maxSamples`：抽检纸张上限（1～10000 的正整数，必填）。
+
+返回：
+
+- `summary`：参与纸张数 `sheetsTotal`、已分配刀次 `cutsAssigned`、
+  抽检纸张 `samplesSelected`、已覆盖 `cutsCovered` / 未覆盖 `cutsUncovered`、
+  未分配刀 `cutsUnassigned`（不计入分母）、**覆盖率 `coverageRate`**
+  （已覆盖 / 已分配，0–1）与停止原因 `stopReason`
+  （`covered` 全部覆盖提前停止（含无已分配刀次）/ `max-samples` 达到纸张上限 /
+  `no-eligible-sheets` 剩余纸张参与的均为未分配成员刀、无可抽检覆盖项）；
+- **`samples`（选中纸张）**：轮次、纸张序号、该纸参与刀次总数、
+  `cuts`（该纸参与的全部全局刀次）与 `newCuts`（本轮新增覆盖刀次）；
+- **`rounds`（逐轮选择依据）**：每轮的选中纸张、新增覆盖刀数与刀号、
+  该纸参与刀次总数、累计覆盖数，以及 `basis`——决胜键
+  （`new-cuts` 新增唯一最多 / `total-cuts` 参与总数决胜 /
+  `sheet-index` 纸张序号决胜）、候选纸数、并列纸数与中文说明 `note`；
+- **`uncoveredCuts`（未覆盖刀次）**：全局刀号、班次、来源批次、合批纸张数
+  与可执行成员纸张；
+- **`unassignedCuts`（未分配刀，单列）**：纸张 / 原刀号 / 原因 / 来源批次。
+
+**校验（返回 HTTP 400）**：
+
+| 情形 | 错误信息要点 |
+| --- | --- |
+| 缺少工单 / 排程结果 | `缺少工单结果（workOrder）` / `缺少排程结果（schedule）` |
+| `maxSamples` 非 1～10000 的正整数 | `抽检纸张上限必须是正整数` / `抽检纸张上限不能超过 10000` |
+| 工单成员在排程批次中找不到 | `…不在排程批次中，成员引用缺失` |
+| 同一刀在多个刀次 / 排程多批中重复出现 | `…出现在多个已分配刀次中` / `…出现在多个批次中` |
+| 工单刀次来源批次缺失或成员集合与排程批次不一致 | `…的成员与排程批次不一致：工单多出…；排程多出…` |
+| 未分配刀不在排程批次中 | `工单未分配刀…不在排程批次中，schedule/workOrder 不一致` |
+| 全局刀号重复、排程批次号重复、成员非法等 | 相应中文错误信息 |
+
+**前端**：工单结果下方提供抽检纸张上限输入与**「生成抽检计划」**按钮，
+结果展示覆盖率进度条、**抽检纸张与覆盖明细表**（每轮新增覆盖刀次、参与总数、
+覆盖的全部全局刀次，粗体为本轮新增）、**逐轮选择依据**列表，以及未覆盖刀次表
+与未分配刀表（后者标注“不计入覆盖率分母”）。
+
 ## 单条命令启动（需要 Docker + Docker Compose）
+
+单条命令构建镜像并启动服务：
 
 ```bash
 docker compose up -d --build
 ```
 
-启动后浏览器访问： **http://localhost:3000**
+启动后浏览器访问： **http://localhost:3000**（端口为容器映射到宿主机的 3000 端口）
+
+健康检查：
+
+```bash
+curl http://localhost:3000/api/health   # {"ok":true}
+```
+
+调用裁切抽检计划（在执行工单结果上生成，`workOrder` 为工单接口返回、
+`schedule` 为叠纸排程返回）：
+
+```bash
+curl -X POST http://localhost:3000/api/layout/stack/work-order/sampling \
+  -H 'Content-Type: application/json' \
+  -d '{"maxSamples":5,"workOrder":{"shifts":[/* 工单返回原样 */]},"schedule":{"batches":[/* 排程返回原样 */]}}'
+```
 
 停止：
 
@@ -451,6 +534,10 @@ npm start          # 默认 http://localhost:3000，可用 PORT=8080 npm start �
 		     未完成则整批不可就绪）与持续阻塞原因（父刀未分配），顶部统计已完成/可执行/
 		     阻塞刀数、班次完成率与整单完成率；勾选实时提交服务端校验（乱序勾选返回 400
 		     并回滚），**刷新页面后从 localStorage 自动恢复当前工单进度**；
+		     - 工单结果下方还提供**裁切抽检计划**：填写抽检纸张上限后点击「生成抽检计划」，
+		     按 **新增覆盖刀次最多 → 参与刀次总数多 → 纸张序号小** 逐轮选纸，
+		     展示覆盖率进度条、抽检纸张与覆盖明细（粗体为本轮新增覆盖刀次）、
+		     **逐轮选择依据**、未覆盖刀次表，以及单列且**不计入覆盖率分母**的未分配刀表；
    - 「排不下的成品 / 未排完的成品」表列出每种规格的纹向要求、已排/需求数量和剩余件数，
      并标明受阻原因（纹向受限 / 尺寸不足）。
 
@@ -464,6 +551,7 @@ npm start          # 默认 http://localhost:3000，可用 PORT=8080 npm start �
 - `POST /api/layout/stack` — 叠纸裁切排程（复用批量/成本结果的 `sheets`，另需 `stackLimit` 叠纸上限；可带 `source`）
 - `POST /api/layout/stack/work-order` — 执行工单（`schedule` 传叠纸排程返回或直接传 `sheets`/`stackLimit`；另需 `maxCutsPerShift`、可选 `maxSheetsPerBatch`；`?format=csv` 下载）
 - `POST /api/layout/stack/work-order/progress` — 现场进度（`workOrder` 传执行工单返回、可选 `schedule`；`completed` 传已完成全局刀号；返回可立即执行/仍阻塞刀次、待完成父刀与班次/整单完成率）
+- `POST /api/layout/stack/work-order/sampling` — 裁切抽检计划（`workOrder` 传执行工单返回、`schedule` 传叠纸排程返回、`maxSamples` 传抽检纸张上限；返回选中纸张与各自覆盖刀次、逐轮选择依据、覆盖率、未覆盖刀次与单列的未分配刀）
 
 单张请求示例（含纹向）：
 
@@ -683,20 +771,55 @@ npm start          # 默认 http://localhost:3000，可用 PORT=8080 npm start �
 错误信息逐条指出缺失父刀。省略 `schedule` 且带 `sheets` 时服务端先排程；
 既无 `schedule` 也无 `sheets` 时依赖按来源批次先后推断（`dependencySource: 'inferred'`）。
 
+裁切抽检计划请求示例（把执行工单返回作为 `workOrder`、叠纸排程返回作为 `schedule`，
+另带抽检纸张上限）：
+
+```json
+{
+  "maxSamples": 5,
+  "workOrder": {
+    "shifts": [
+      { "shiftNo": 1, "cutsTotal": 2, "sheetsCut": 3, "cuts": [
+        { "cutNo": 1, "cutInShift": 1, "batchNo": 1, "orient": "h",
+          "region": { "w": 889, "h": 1194 }, "sheetCount": 2,
+          "members": [ { "sheetIndex": 1, "cutNo": 1 }, { "sheetIndex": 2, "cutNo": 1 } ] },
+        { "cutNo": 2, "cutInShift": 2, "batchNo": 2, "orient": "v",
+          "region": { "w": 200, "h": 300 }, "sheetCount": 1,
+          "members": [ { "sheetIndex": 1, "cutNo": 2 } ] }
+      ] }
+    ],
+    "crossShiftDeps": [],
+    "unassigned": []
+  },
+  "schedule": { "batches": [
+    { "batchNo": 1, "members": [ { "sheetIndex": 1, "cutNo": 1 }, { "sheetIndex": 2, "cutNo": 1 } ] },
+    { "batchNo": 2, "members": [ { "sheetIndex": 1, "cutNo": 2 } ] }
+  ] }
+}
+```
+
+返回包含 `summary`（参与纸张数、已分配刀次、抽检纸张、已覆盖/未覆盖/未分配刀数、
+**覆盖率 `coverageRate`** 与停止原因）、`samples`（每张抽检纸参与与本轮新增覆盖的
+全局刀次）、`rounds`（逐轮新增数、参与总数、累计覆盖与 `basis` 选择依据）、
+`uncoveredCuts`（未覆盖刀次）与 `unassignedCuts`（未分配刀，单列且不计入分母）。
+上例第 1 张纸参与全部 2 个刀次，故抽检 1 张即覆盖率 100%、提前停止。
+成员引用缺失、重复归属或 schedule/workOrder 不一致、`maxSamples` 非法时返回 HTTP 400。
+
 ## 项目结构
 
 ```
 .
-├── server.js            # Express 入口：静态页面 + /api/layout + /api/layout/compare + /api/layout/batch + /api/layout/cost + /api/layout/stack + /api/layout/stack/work-order + /api/layout/stack/work-order/progress
+├── server.js            # Express 入口：静态页面 + /api/layout + /api/layout/compare + /api/layout/batch + /api/layout/cost + /api/layout/stack + /api/layout/stack/work-order + /api/layout/stack/work-order/progress + /api/layout/stack/work-order/sampling
 ├── src/packer.js        # 断头台二分排样核心（单张 layout + 三策略方案比选 layoutCompare + 固定纸型批量 layoutBatch，含纹向、订单隔离与成套生产）
 ├── src/cost.js          # 多纸型成本排产（逐轮试排候选、单位面积成本择优、库存成本核算、订单×纸型隔离与成套生产）
 ├── src/stack.js         # 叠纸裁切排程（复用批量/成本切割树，按区域宽高/刀向/刀位/刀缝合批、父刀约束与确定性选批；返回 dependencies 父刀图）
 ├── src/workorder.js     # 执行工单（排程批次按每班刀次/每批纸张容量做稳定拓扑分班、跨班次依赖、未分配原因、CSV 导出）
 ├── src/progress.js      # 现场进度（按合批刀次的全部成员纸张汇总父刀依赖；校验已完成全局刀号、乱序/未知刀号 400；输出可执行/阻塞刀次与班次/整单完成率）
+├── src/sampling.js      # 裁切抽检计划（已分配全局刀次为覆盖目标；按 新增覆盖最多→参与刀次总数多→纸张序号小 逐轮选纸；覆盖率、未覆盖刀次、未分配刀单列；成员引用/重复归属/工单排程一致性 400）
 ├── public/
 │   ├── index.html       # 单页界面（单张/批量/多纸型三种模式，纹向、订单号与隔离开关录入，单张模式含比选目标分段控件，批量/成本结果含叠纸排程、执行工单与现场进度面板）
 │   ├── style.css
-│   └── app.js           # 表单交互 + SVG 渲染 + 比选标签页 + 逐张查看 + 成本/订单汇总 + 叠纸批次表/逐纸进度 + 执行工单班次清单与 JSON/CSV 导出 + 现场进度勾选面板（localStorage 恢复）（原生 JS）
+│   └── app.js           # 表单交互 + SVG 渲染 + 比选标签页 + 逐张查看 + 成本/订单汇总 + 叠纸批次表/逐纸进度 + 执行工单班次清单与 JSON/CSV 导出 + 现场进度勾选面板（localStorage 恢复）+ 裁切抽检计划（覆盖率/覆盖明细/逐轮依据）（原生 JS）
 ├── test/smoke.test.js   # 单张/固定纸型批量算法不变量测试（node:test，无额外依赖）
 ├── test/compare.test.js # 方案比选测试：三策略候选、两种目标决胜链、全部排不进不指定最佳、确定性、校验
 ├── test/cost.test.js    # 多纸型成本排产测试：择优规则、同分顺序、库存、终止原因、校验
@@ -706,6 +829,7 @@ npm start          # 默认 http://localhost:3000，可用 PORT=8080 npm start �
 ├── test/stack.test.js   # 叠纸裁切排程测试：合批条件、父刀先后、叠纸上限、可合并张数/总切线长/纸张序号/原刀序决胜、未排原因、校验
 ├── test/workorder.test.js # 执行工单测试：拓扑分班与班容量守恒、不打乱批次内纸张顺序、跨班次依赖、超容量/父刀缺失/阻断/环、CSV 导出、校验
 ├── test/progress.test.js  # 现场进度测试：就绪/阻塞判定、合批成员父刀汇总（任一张父刀未完成整批不可就绪）、未知刀号与乱序完成 400、未分配父刀持续阻塞、推断依赖与 sheets 回退、班次/整单完成率、确定性、校验
+├── test/sampling.test.js  # 裁切抽检计划测试：三级决胜链、逐轮依据快照、覆盖率与未覆盖刀次、未分配刀单列不计入分母、真实排产贯通、成员引用缺失/重复归属/工单排程不一致 400、确定性、边界
 ├── Dockerfile
 └── docker-compose.yml
 ```
@@ -781,3 +905,12 @@ CSV 表头/逐纸已分配行/未分配行/字段转义与 UTF-8 BOM，
 不传 schedule 时按批次先后推断（含未分配刀入链）、带 sheets 时服务端先排程、
 各班完成率独立统计与已完成班次数推进、同输入两次结果完全一致（确定性），
 以及无已分配刀次、全局刀号重复、同一成员刀跨刀次、非法 dependencies/unassigned 等边界。
+
+裁切抽检计划另覆盖：逐轮按**新增覆盖刀次最多**选纸（新增数随覆盖集递减）、
+新增并列时按**参与刀次总数多**决胜、再并列按**纸张序号小**决胜、
+覆盖完成提前停止与达到 `maxSamples` 停止（未覆盖刀次列出）、
+**未分配成员刀不参与可抽检覆盖且未分配清单单列不计入分母**、
+逐轮依据与选中纸张覆盖刀次的人工并集核对、真实「批量→排程→工单」贯通与确定性、
+成员引用缺失 / 重复归属（同刀次与跨刀次、排程多批）/ schedule 与 workOrder 成员集合
+或来源批次不一致 / 未分配刀不在排程中等 400 校验，以及缺少工单/排程、
+上限非 1～10000 正整数、无已分配刀次、非法 unassigned 记录等边界。

@@ -152,6 +152,21 @@
           </div>
           <div id="woError" class="form-error" hidden></div>
           <div id="woResult" class="workorder-result" hidden></div>
+          <div id="samplingPanel" class="sampling-panel" hidden>
+            <h3>裁切抽检计划（按覆盖刀次选纸）</h3>
+            <div class="sampling-controls">
+              <label>抽检纸张上限（张）
+                <input type="number" id="spMaxSamples" value="5" min="1" max="10000" step="1" />
+              </label>
+              <button type="button" id="spGenerate" class="btn btn-primary">生成抽检计划</button>
+              <p class="hint">每个已分配全局刀次都是必须覆盖目标，抽检一张纸即覆盖它参与的全部刀次
+                （合批刀次一刀多张，抽到其中一张即覆盖该刀）。逐轮按
+                <b>新增覆盖刀次最多 → 该纸参与刀次总数多 → 纸张序号小</b>选纸，
+                达到上限或全部覆盖即止；<b>未分配刀单列且不计入覆盖率分母</b>。</p>
+            </div>
+            <div id="spError" class="form-error" hidden></div>
+            <div id="spResult" class="sampling-result" hidden></div>
+          </div>
           <div id="progressPanel" class="site-progress" hidden></div>
         </div>
       </div>
